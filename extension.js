@@ -399,6 +399,15 @@ function addNotification(source, notification) {
         source.addNotification(notification);
     }
 }
+// GNOME 50 removed Meta.Cursor and display.set_cursor(); cursors are set per
+// actor with set_cursor_type() and shown while the pointer is over it
+function setPointerCursor(actor) {
+    actor.set_cursor_type?.(Clutter.CursorType.POINTER);
+}
+function setDisplayCursor(pointer) {
+    if (Meta.Cursor)
+        Shell.Global.get().display.set_cursor(pointer ? Meta.Cursor.POINTING_HAND : Meta.Cursor.DEFAULT);
+}
 function scrollViewAddChild(scrollView, actor) {
     if (scrollView.add_actor !== undefined) {
         // @ts-expect-error gnome 45 type, or even some gnome 46 distros do support that, so using this check, instead of isGnome45()!
@@ -432,7 +441,13 @@ const notify = (ext, text, body, iconOrPixbuf, pixelFormat) => {
     if (iconOrPixbuf) {
         if (iconOrPixbuf instanceof GdkPixbuf.Pixbuf) {
             const content = St.ImageContent.new_with_preferred_size(iconOrPixbuf.width, iconOrPixbuf.height);
-            content.set_bytes(iconOrPixbuf.read_pixel_bytes(), pixelFormat || Cogl.PixelFormat.RGBA_8888, iconOrPixbuf.width, iconOrPixbuf.height, iconOrPixbuf.rowstride);
+            const args = [iconOrPixbuf.read_pixel_bytes(), pixelFormat || Cogl.PixelFormat.RGBA_8888, iconOrPixbuf.width, iconOrPixbuf.height, iconOrPixbuf.rowstride];
+            // GNOME 50: set_bytes() takes the Cogl context first
+            const coglContext = global$2.stage.context?.get_backend?.().get_cogl_context?.();
+            if (coglContext)
+                content.set_bytes(coglContext, ...args);
+            else
+                content.set_bytes(...args);
             notification = newNotification(source, text, body, true, { gicon: content });
         }
         else {
@@ -512,6 +527,9 @@ let SettingsMenu = class SettingsMenu extends Button {
     constructor(ext, onClear, onToggle) {
         const _ = gettext(ext);
         super(0.5, 'Pano Indicator', false);
+        // GNOME 50+: the button opens its menu from a click gesture that fires
+        // for any button; left and middle click toggle Pano instead (vfunc_event)
+        this._clickGesture?.set_required_button(Clutter.BUTTON_SECONDARY);
         this.ext = ext;
         this.onToggle = onToggle;
         this.settings = getCurrentExtensionSettings(this.ext);
@@ -565,11 +583,18 @@ let SettingsMenu = class SettingsMenu extends Button {
                 this.onToggle();
                 return Clutter.EVENT_STOP;
             }
+            // GNOME 50+: PanelMenu.Button's click gesture opens the menu (it is
+            // limited to the right button in the constructor) and there is
+            // no parent vfunc_event any more
+            if (this._clickGesture)
+                return Clutter.EVENT_PROPAGATE;
             else if (this.menu && event.get_button() === Clutter.BUTTON_SECONDARY) {
                 this.menu.toggle();
                 return Clutter.EVENT_STOP;
             }
         }
+        if (this._clickGesture)
+            return Clutter.EVENT_PROPAGATE;
         return super.vfunc_event(event);
     }
     destroy() {
@@ -948,12 +973,12 @@ let PanoItemHeader = class PanoItemHeader extends St.BoxLayout {
     constructor(ext, itemType, date) {
         super({
             styleClass: `pano-item-header pano-item-header-${itemType.classSuffix}`,
-            vertical: false,
+            orientation: Clutter.Orientation.HORIZONTAL,
         });
         this.itemType = itemType;
         this.titleContainer = new St.BoxLayout({
             styleClass: 'pano-item-title-container',
-            vertical: true,
+            orientation: Clutter.Orientation.VERTICAL,
             xExpand: true,
         });
         this.iconContainer = new St.BoxLayout({
@@ -1086,23 +1111,24 @@ let PanoItem = class PanoItem extends St.BoxLayout {
             pivotPoint: Graphene.Point.alloc().init(0.5, 0.5),
             reactive: true,
             styleClass: 'pano-item',
-            vertical: true,
+            orientation: Clutter.Orientation.VERTICAL,
             trackHover: true,
         });
         this.selected = null;
         this.clipboardManager = clipboardManager;
         this.dbItem = dbItem;
         this.settings = getCurrentExtensionSettings(ext);
+        setPointerCursor(this);
         this.connect('key-focus-in', () => this.setSelected(true));
         this.connect('key-focus-out', () => this.setSelected(false));
         this.connect('enter-event', () => {
-            Shell.Global.get().display.set_cursor(Meta.Cursor.POINTING_HAND);
+            setDisplayCursor(true);
             if (!this.selected) {
                 this.set_style(`border: 4px solid ${this.settings.get_string('hovered-item-border-color')}`);
             }
         });
         this.connect('leave-event', () => {
-            Shell.Global.get().display.set_cursor(Meta.Cursor.DEFAULT);
+            setDisplayCursor(false);
             if (!this.selected) {
                 this.set_style('');
             }
@@ -1146,7 +1172,7 @@ let PanoItem = class PanoItem extends St.BoxLayout {
         this.body = new St.BoxLayout({
             styleClass: 'pano-item-body',
             clipToAllocation: true,
-            vertical: true,
+            orientation: Clutter.Orientation.VERTICAL,
             xAlign: Clutter.ActorAlign.FILL,
             yAlign: Clutter.ActorAlign.FILL,
             xExpand: true,
@@ -1623,7 +1649,7 @@ let ColorPanoItem = class ColorPanoItem extends PanoItem {
         this.body.add_style_class_name('pano-item-body-color');
         this.colorItemSettings = this.settings.get_child('color-item');
         const colorContainer = new St.BoxLayout({
-            vertical: false,
+            orientation: Clutter.Orientation.HORIZONTAL,
             xExpand: true,
             yExpand: true,
             yAlign: Clutter.ActorAlign.FILL,
@@ -1677,7 +1703,7 @@ let EmojiPanoItem = class EmojiPanoItem extends PanoItem {
         this.body.add_style_class_name('pano-item-body-emoji');
         this.emojiItemSettings = this.settings.get_child('emoji-item');
         const emojiContainer = new St.BoxLayout({
-            vertical: false,
+            orientation: Clutter.Orientation.HORIZONTAL,
             xExpand: true,
             yExpand: true,
             yAlign: Clutter.ActorAlign.FILL,
@@ -1730,7 +1756,7 @@ let FilePanoItem = class FilePanoItem extends PanoItem {
         this.fileItemSettings = this.settings.get_child('file-item');
         const container = new St.BoxLayout({
             styleClass: 'copied-files-container',
-            vertical: true,
+            orientation: Clutter.Orientation.VERTICAL,
             xExpand: true,
             yExpand: false,
             yAlign: Clutter.ActorAlign.FILL,
@@ -1742,7 +1768,7 @@ let FilePanoItem = class FilePanoItem extends PanoItem {
         })
             .forEach((uri) => {
             const bl = new St.BoxLayout({
-                vertical: false,
+                orientation: Clutter.Orientation.HORIZONTAL,
                 styleClass: 'copied-file-name',
                 xExpand: true,
                 xAlign: Clutter.ActorAlign.FILL,
@@ -1801,14 +1827,14 @@ let ImagePanoItem = class ImagePanoItem extends PanoItem {
         const { width, height, size } = JSON.parse(dbItem.metaData || '{}');
         this.metaContainer = new St.BoxLayout({
             styleClass: 'pano-item-body-meta-container',
-            vertical: true,
+            orientation: Clutter.Orientation.VERTICAL,
             xExpand: true,
             yExpand: true,
             yAlign: Clutter.ActorAlign.END,
             xAlign: Clutter.ActorAlign.FILL,
         });
         const resolutionContainer = new St.BoxLayout({
-            vertical: false,
+            orientation: Clutter.Orientation.HORIZONTAL,
             xExpand: true,
             yAlign: Clutter.ActorAlign.FILL,
             xAlign: Clutter.ActorAlign.FILL,
@@ -1829,7 +1855,7 @@ let ImagePanoItem = class ImagePanoItem extends PanoItem {
         resolutionContainer.add_child(this.resolutionTitle);
         resolutionContainer.add_child(this.resolutionValue);
         const sizeContainer = new St.BoxLayout({
-            vertical: false,
+            orientation: Clutter.Orientation.HORIZONTAL,
             xExpand: true,
             yAlign: Clutter.ActorAlign.FILL,
             xAlign: Clutter.ActorAlign.FILL,
@@ -1928,7 +1954,7 @@ let LinkPanoItem = class LinkPanoItem extends PanoItem {
         this.body.add_style_class_name('pano-item-body-link');
         this.metaContainer = new St.BoxLayout({
             styleClass: 'pano-item-body-meta-container',
-            vertical: true,
+            orientation: Clutter.Orientation.VERTICAL,
             xExpand: true,
             yExpand: false,
             yAlign: Clutter.ActorAlign.END,
@@ -1952,7 +1978,7 @@ let LinkPanoItem = class LinkPanoItem extends PanoItem {
             imageFilePath = `file://${getCachePath(ext)}/${image}.png`;
         }
         const imageContainer = new St.BoxLayout({
-            vertical: true,
+            orientation: Clutter.Orientation.VERTICAL,
             xExpand: true,
             yExpand: true,
             yAlign: Clutter.ActorAlign.FILL,
@@ -2591,13 +2617,13 @@ let PanoScrollView = class PanoScrollView extends St.ScrollView {
         this.settings = getCurrentExtensionSettings(this.ext);
         this.setScrollbarPolicy();
         this.list = new St.BoxLayout({
-            vertical: isVertical(this.settings.get_uint('window-position')),
+            orientation: isVertical(this.settings.get_uint('window-position')) ? Clutter.Orientation.VERTICAL : Clutter.Orientation.HORIZONTAL,
             xExpand: true,
             yExpand: true,
         });
         this.settings.connect('changed::window-position', () => {
             this.setScrollbarPolicy();
-            this.list.set_vertical(isVertical(this.settings.get_uint('window-position')));
+            this.list.set_orientation(isVertical(this.settings.get_uint('window-position')) ? Clutter.Orientation.VERTICAL : Clutter.Orientation.HORIZONTAL);
         });
         scrollViewAddChild(this, this.list);
         const shouldFocusOut = (symbol) => {
@@ -2985,7 +3011,7 @@ let SearchBox = class SearchBox extends St.BoxLayout {
         super({
             xAlign: Clutter.ActorAlign.CENTER,
             styleClass: 'search-entry-container',
-            vertical: false,
+            orientation: Clutter.Orientation.HORIZONTAL,
             trackHover: true,
             reactive: true,
         });
@@ -3112,14 +3138,15 @@ let SearchBox = class SearchBox extends St.BoxLayout {
         else {
             icon.set_gicon(iconNameOrProto);
         }
+        setPointerCursor(icon);
         icon.connect('enter-event', () => {
-            Shell.Global.get().display.set_cursor(Meta.Cursor.POINTING_HAND);
+            setDisplayCursor(true);
         });
         icon.connect('motion-event', () => {
-            Shell.Global.get().display.set_cursor(Meta.Cursor.POINTING_HAND);
+            setDisplayCursor(true);
         });
         icon.connect('leave-event', () => {
-            Shell.Global.get().display.set_cursor(Meta.Cursor.DEFAULT);
+            setDisplayCursor(false);
         });
         return icon;
     }
@@ -3187,7 +3214,7 @@ let PanoWindow = class PanoWindow extends St.BoxLayout {
             constraints: getMonitorConstraint(),
             styleClass: 'pano-window',
             visible: false,
-            vertical: true,
+            orientation: Clutter.Orientation.VERTICAL,
             reactive: true,
             opacity: 0,
             canFocus: true,
@@ -3408,7 +3435,12 @@ class PanoExtension extends Extension {
         this.start();
         this.indicator.enable();
         this.enableDbus();
-        Meta.disable_unredirect_for_display(global.display);
+        // GNOME 50 moved this to the compositor; it was the last step of
+        // enable() and failing here left Pano in ERROR state
+        if (Meta.disable_unredirect_for_display)
+            Meta.disable_unredirect_for_display(global.display);
+        else
+            global.compositor.disable_unredirect();
         debug('extension is enabled');
     }
     disable() {
@@ -3419,7 +3451,10 @@ class PanoExtension extends Extension {
         this.keyManager = null;
         this.clipboardManager = null;
         this.indicator = null;
-        Meta.enable_unredirect_for_display(global.display);
+        if (Meta.enable_unredirect_for_display)
+            Meta.enable_unredirect_for_display(global.display);
+        else
+            global.compositor.enable_unredirect();
         debug('extension is disabled');
     }
     // for dbus
